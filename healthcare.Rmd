@@ -1,0 +1,103 @@
+---
+title: "Healthcare Analyses"
+author: "Zanger-Tishler et al."
+date: "January 2023"
+output: html_document
+---
+
+```{r setup, echo=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library("tidyverse")
+library("pROC")
+library("glmnet")
+library(scales)
+theme_set(theme_bw())
+```
+
+Here, we create the true and proxy labels, as well as the simple and complex models used to assign individuals to the program. 
+```{r}
+high_needs <- 0.1
+
+my_data <- read_csv("data/obermeyer.csv") %>%
+  mutate(
+    proxy_label = cost_t >= quantile(cost_t, 1-high_needs),
+    true_label = gagne_sum_t >= 3)
+```
+
+Next, we fit the model:
+```{r}
+# The "complex" model uses all information available at time t-1 except for the 
+# Gagne sum, whose value at time t we use as the true label, yielding a model
+# with 149 predictive variables.
+#
+# The "simple" model further excludes cost and demographic variables, yielding a 
+# model with 127 predictive variables.
+
+training_data_complex <- my_data %>%
+  select(ends_with('_tm1'), -gagne_sum_tm1, race, dem_female, proxy_label)
+
+training_data_simple <- training_data_complex %>%
+  select(-starts_with('cost'), -race, -dem_female, -starts_with('dem_age'))
+
+simple_m <- glm(proxy_label ~ ., data = training_data_simple, family=binomial())
+complex_m <- glm(proxy_label ~ ., data = training_data_complex, family=binomial())
+
+my_data <- my_data %>%
+  mutate(
+    simple_pred = predict(simple_m),
+    complex_pred = predict(complex_m)
+  )
+```
+
+Now, we evaluate the performance of the models:
+```{r}
+# compute the performance of the simple and complex models
+# on the proxy and true labels.
+
+AUC_df <- tibble("Label" = c("Proxy Label", "True Label"),
+  `Simple Model` = c(auc(my_data$proxy_label, my_data$simple_pred, quiet = TRUE) + 0, 
+                     auc(my_data$true_label, my_data$simple_pred, quiet = TRUE) + 0),
+  `Complex Model` = c(auc(my_data$proxy_label, my_data$complex_pred, quiet = TRUE) + 0, 
+                      auc(my_data$true_label, my_data$complex_pred, quiet = TRUE) + 0)) %>%
+  mutate(`Simple Model` = round(`Simple Model`, digits = 2),
+         `Complex Model` = round(`Complex Model`, digits = 2)) %>%
+  print()
+```
+Check how program capacity affects enrollment of high needs patients:
+
+```{r}
+recall <- my_data %>%
+  select(complex_pred, simple_pred, true_label) %>%
+  rename(Simple = simple_pred, Complex = complex_pred) %>%
+  pivot_longer(c(Simple, Complex), names_to="Model", values_to="prediction") %>%
+  group_by(Model) %>%
+  arrange(desc(prediction)) %>%
+  mutate(capacity = 1:n(),
+         total_high_needs = cumsum(true_label)) %>%
+  mutate(Model= factor(Model, levels=c("Simple", "Complex")))
+
+ggplot(recall) +
+   geom_line(aes(x = capacity, y = total_high_needs, color = Model), size=1) +
+   scale_x_continuous("Enrollment capacity", limits=c(0,20000), labels=comma_format()) +
+   scale_y_continuous("Enrolled high-needs patients", labels=comma_format()) 
+
+ggsave('figs/healthcare.pdf', height=4, width=5)
+```
+```{r}
+recall_race <- my_data %>%
+  select(complex_pred, simple_pred, true_label, race) %>%
+  rename(Simple = simple_pred, Complex = complex_pred) %>%
+  pivot_longer(c(Simple, Complex), names_to="Model", values_to="prediction") %>%
+  group_by(Model) %>%
+  arrange(desc(prediction)) %>%
+  mutate(capacity = 1:n(),
+         total_high_needs = cumsum(race=="black")) %>%
+  mutate(Model= factor(Model, levels=c("Simple", "Complex")))
+
+ggplot(recall_race) +
+   geom_line(aes(x = capacity, y = total_high_needs, color = Model), size=1) +
+   scale_x_continuous("Enrollment capacity", limits=c(0,20000), labels=comma_format()) +
+   scale_y_continuous("Enrolled Black patients", labels=comma_format()) 
+
+ggsave('figs/healthcare_race.pdf', height=4, width=5)
+```
